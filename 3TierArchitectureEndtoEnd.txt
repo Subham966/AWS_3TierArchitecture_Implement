@@ -1,0 +1,277 @@
+
+Followed this Documents:
+https://catalog.us-east-1.prod.workshops.aws/workshops/85cd2bb2-7f79-4e96-bdee-8078e469752a/en-US/part1/securitygroups
+
+
+Part 0: Setup
+	[ S3 Bucket Creation
+	  IAM EC2 Instance Role Creation
+	  Download Code from Github Repository ]
+
+
+	i. Download Code from Github:
+	git clone https://github.com/aws-samples/aws-three-tier-web-architecture-workshop.git
+
+	ii. S3 Bucket Creation (ACLs Disabled)
+
+	ii. IAM EC2 Instance Role Creation
+		EC2 - policy attach 
+		AmazonSSMManagedInstanceCore
+		AmazonS3ReadOnlyAccess
+		Create Role
+	
+	
+Part 1: Networking and Security
+	[ VPC
+	  Subnets
+	  Route Tables
+	  Internet Gateway
+	  NAT gateway
+	  Security Groups ]
+		
+	VPC - CIDR range - 10.0.0.0/16
+
+	Public-Web-Subnet-AZ-1 - 10.0.0.0/24 - us-east-1a
+	Public-Web-Subnet-AZ-2 - 10.0.1.0/24 - us-east-1b
+
+	Private-App-Subnet-AZ-1 - 10.0.2.0/24 - us-east-1a
+	Private-App-Subnet-AZ-2 - 10.0.3.0/24 - us-east-1b
+	
+	Private-DB-Subnet-AZ-1 - 10.0.4.0/24 - us-east-1a
+	Private-DB-Subnet-AZ-2 - 10.0.5.0/24 - us-east-1b
+
+	Create Internet Gateway - Attach igw to VPC
+	Create NAT gateway - Public Subnet AZ-1	
+	
+	Create Route Table-1 - Igw + Subnet Association - (Public-Web-Subnet-AZ-1 and Public-Web-Subnet-AZ-2)
+	
+	Create Route Table-2 - NAT gateway + Subnet Association - (Private-App-Subnet-AZ-1)
+
+	
+	Create Security Groups: InternetFacing-lb-sg (External load balancer security groups) - HTTP - Anywhere-IPv4 and HTTP - Anywhere-IPv6 
+				WebTier-sg - HTTP - InternalFacing-lb-sg and HTTP - MYIP
+				Internal-lb-sg (WebServer Can Access Only) - HTTP - WebTier-sg
+				Private-instance-sg - HTTP - Internal-lb-sg - port-4000 and HTTP - MYIP - port-4000
+				DB-sg - MYSQL/Aurora - Custom - Private-instance-sg - port-3306
+
+
+Part 2: Database Deployment
+	[ Deploy Database Layer
+	  Subnet Groups
+	  Multi-AZ Database ]
+
+	Goto RDS - Create DB subnet group
+		   AZ - 1a and 1b
+		   Subnet group - Private-DB-Subnet-AZ-1 - 10.0.4.0/24
+				  Private-DB-Subnet-AZ-2 - 10.0.5.0/24
+	
+	Create database - Standard create - Amazon Aurora database
+	Templates - Dev/Test
+	Availability and durability - Create an Aurora Replica or reader node in a different availability zone
+	Compute Resourse - Don't Connect to an EC2 CR
+	Network Type - IPv4
+	public access - No
+	Security group - DB-sg
+
+
+Part 3: App Tier Instance Deployment
+	[ Create App Tier Instance
+	  Configure Software Stack
+	  Configure Database Schema
+	  Test DB connectivity ]
+
+	Create EC2 server - Linux 
+		Subnet - Private-App-Subnet-AZ-1
+		SG - Private-instance-sg
+		Advance setting - IAM role select
+	
+		Connect via session manager
+			$ sudo -su ec2-user
+			$ ping 8.8.8.8
+			$ sudo yum install mysql -y
+
+			[ $ sudo wget https://dev.mysql.com/get/mysql57-community-release-e17-11.noarch.rpm
+			  $ sudo rpm --import https://dev.mysql.com/RPM-GPG-KEY-mysql-2022
+			  $ sudo yum install https://dev.mysql.com/get/mysql57-community-release-e17-11.noarch.rpm ]
+			
+			$ mysql -h database-1-instance-1.c0capommwqmn.us-east-1.rds.amazonaws.com -u admin -p
+			$ CREATE DATABASE webappdb;   
+			$ SHOW DATABASES;
+			$ USE webappdb;    
+			$ USE webappdb;    
+
+			$ CREATE TABLE IF NOT EXISTS transactions(id INT NOT NULL AUTO_INCREMENT, amount DECIMAL(10,2), description VARCHAR(100), PRIMARY KEY(id));    
+
+			$ SHOW TABLES;    
+
+			$ INSERT INTO transactions (amount,description) VALUES ('400','groceries');   
+			
+			$ SELECT * FROM transactions;
+
+			$ exit
+	
+	Configure App Instance - 
+			i. open the {application-code/app-tier/DbConfig.js} file from the github repo - Download
+
+			ii. Upload the app-tier folder to the S3 bucket
+
+			iii. Go back to your SSM session. Now we need to install all of the necessary components to run our backend application. Start by installing NVM (node version manager)
+				
+				$ curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.38.0/install.sh | bash 
+				$ source ~/.bashrc
+
+				$ nvm install 16
+				$ nvm use 16
+
+				$ npm install -g pm2   
+
+				$ cd ~/
+				$ aws s3 cp s3://3tier-project-bucket/app-tier/ app-tier --recursive
+
+				$ cd app-tier/
+				$ npm install
+				$ pm2 start index.js
+
+				$ pm2 list
+
+				$ pm2 logs
+
+				$ pm2 startup
+
+				$ pm2 save
+
+
+
+	Test App Tier - 
+		$ curl http://localhost:4000/health
+		$ curl http://localhost:4000/transaction
+		
+Part 4: Internal Load Balancing and Auto Scaling
+	[ Create an AMI of our App Tier
+	  Create a Launch Template
+	  Configure Autoscaling
+	  Deploy Internal Load Balancer ]
+ 
+	App Tier AMI - Goto EC2 instance - Actions - select Image and templates - Click Create Image
+							- appserverimage
+
+	Create Target Group - instance - HTTP - 4000 - HTTP1   - AppTierTG
+					 Health check - HTTP 
+					 Health_check_Path - /HTTP 
+					 Targets - All
+
+	Internal Load Balancer - Application Load Balancer - name-App-tier-internal-lb	
+				schema - internal, IPv4
+				Subnet - Private-DB-Subnet-AZ-1 and Private-DB-Subnet-AZ-2
+				Security Groups - Internal-lb-sg
+				Protocol - HTTP -80
+				Select Target Group
+
+	Launch Template - App server LT
+			  My AMIs - Owned by me (Select existing which you created)
+			  key pair - Don't need a key pair to access
+			  SG - Private-instance-sg
+			  Advance details - IAM role select
+
+	Auto Scaling - AppserverASG
+			Select Launch Template - App server LT
+			VPC - Private-DB-Subnet-AZ-1 and Private-DB-Subnet-AZ-2
+			Attach to an existing load balancer - App server LT
+			targets group - Appserver TG
+			Configure group size = 2 
+			scaling policies = None
+
+
+Part 5: Web Tier Instance Deployment
+	[ Update NGINX Configuration Files
+ 	  Create Web Tier Instance
+  	  Configure Software Stack ]
+
+	Update Config File
+	[Before we create and configure the web instances, open up the application-code/nginx.conf file from the repo we downloaded. 
+ 	Scroll down to line 58 and replace [INTERNAL-LOADBALANCER-DNS] with your internal load balancer’s DNS entry. 
+ 	You can find this by navigating to your internal load balancer's details page.]
+	Then, upload this file and the application-code/web-tier folder to the s3 bucket you created for this lab.
+
+	Web Instance Deployment - Amazon Linux
+		Name - Demo Web Server
+		key pair - Don't need a key pair to access
+		Public-Web-Subnet-AZ-1
+		Auto assign Public-IP - Enable
+		SG - WebTier-sg
+		HTTP - TCP - 80
+		Advance details - IAM role select
+		
+		Connect via session manager
+			$ sudo -su ec2-user
+			$ ping 8.8.8.8
+			$ curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.38.0/install.sh | bash 
+				$ source ~/.bashrc
+
+				$ nvm install 16
+				$ nvm use 16
+
+				$ npm install -g pm2   
+
+				$ cd ~/
+				$ aws s3 cp s3://3tier-project-bucket/web-tier/ web-tier --recursive
+
+				$ cd ~/web-tier
+				$ npm install
+				$ npm run build
+				$ sudo amazon-linux-extras install nginx1 -y
+
+				$ cd /etc/nginx/
+
+				$ sudo cp nginx.conf nginx.conf_bkp
+
+				$ aws s3 cp s3://3tier-project-bucket/nginx.conf .
+				
+				$ sudo service nginx restart
+				[ Optional - $ (if you get error open (sudo vi nginx.conf) and do update then apply this command)
+					   $ sudo service nginx restart ]
+				$ sudo service nginx status
+
+				$ chmod -R 755 /home/ec2-user
+
+				$ sudo chkconfig nginx on
+				$ curl localhost:80
+
+
+
+	Demo Web Server - Create an Image - Webserverimage
+			Create Target Group - Instances - WebTierTG
+			HTTP - 80 - HTTP1
+			Health check - HTTP 
+			Health_check_Path - /health
+			Targets - All
+	Create Load Balancer - Application Load Balancer - name-Web-tier-external-lb	
+				schema - internal, IPv4
+				Subnet - Public-Web-Subnet-AZ-1 and Public-Web-Subnet-AZ-2
+				Security Groups - InternetFacing-lb-sg
+				Protocol - HTTP -80
+				Select Target Group - Webserver TG
+
+		
+	Launch Template - Web server LT
+			  My AMIs - Owned by me (Select existing which you created -Webserverimage)
+			  key pair - Don't need a key pair to access
+			  SG - WebTier-sg
+			  Advance details - IAM role select
+
+	Auto Scaling - WebserverASG
+			Select Launch Template - Web server LT
+			VPC - Public-Web-Subnet-AZ-1 and Public-Web-Subnet-AZ-2
+			Attach to an existing load balancer - Web-tier-external-lb
+			targets group - Webserver TG
+			Configure group size = 2 
+			scaling policies = None
+
+	$ Now Copy the Web-tier-external-lb id and paste You can see the Content of Both Web and DB.
+
+
+
+
+
+
+
